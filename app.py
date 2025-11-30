@@ -16,7 +16,11 @@ from redis.asyncio import Redis
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_CHANNEL = int(os.environ["ADMIN_CHANNEL"])
-REDIS_URL = os.environ["REDIS_URL"]  # строка подключения к Redis
+
+REDIS_URL = os.getenv("REDIS_URL")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL не задан в переменных окружения Vercel")
+
 
 PRICE_MAIN = 300
 PRICE_EXTRA = 50
