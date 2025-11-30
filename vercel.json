@@ -1,0 +1,4 @@
+# ---------- WEBHOOK ----------
+@app.post("/")
+async def telegram_webhook(request: Request):
+    # ... обработка
