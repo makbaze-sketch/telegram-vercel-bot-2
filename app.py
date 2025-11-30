@@ -1,6 +1,5 @@
 import os
-import json
-from pathlib import Path
+
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -12,11 +11,12 @@ from aiogram.types import (
     Update,
 )
 from aiogram.filters import Command
+from redis.asyncio import Redis
 
-# --------- CONFIG ---------
-TOKEN = os.environ["BOT_TOKEN"]
+# ---------- CONFIG ----------
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_CHANNEL = int(os.environ["ADMIN_CHANNEL"])
-
+REDIS_URL = os.environ["REDIS_URL"]  # строка подключения к Redis (Upstash и т.п.)
 
 PRICE_MAIN = 300
 PRICE_EXTRA = 50
@@ -27,48 +27,36 @@ TITLE_EXTRA = "Доп. актив"
 DESC_MAIN = "Основной товар за 300⭐"
 DESC_EXTRA = "Дополнительный товар за 50⭐"
 
-BUYERS_FILE = "buyers.json"  # На Vercel НЕ ПЕРСИСТЕНТНО, только для разработки
-
-# --------- GLOBAL OBJECTS ---------
+# ---------- GLOBALS ----------
 app = FastAPI()
-bot = Bot(token=TOKEN)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# --------- UTILS ---------
-BUYERS_PATH = Path(BUYERS_FILE)
+redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
 
-def load_buyers():
-    if not BUYERS_PATH.exists():
-        return []
-    try:
-        with BUYERS_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except json.JSONDecodeError:
-        return []
+# ---------- STORAGE ----------
+MAIN_SET_KEY = "buyers_main"  # множество user_id, купивших основной товар
 
 
-def save_buyers(data):
-    # WARNING: на Vercel это не гарантирует сохранность между вызовами
-    with BUYERS_PATH.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
+async def user_has_main(user_id: int) -> bool:
+    """
+    True, если пользователь уже купил основной товар.
+    """
+    return await redis.sismember(MAIN_SET_KEY, str(user_id))
 
 
-def user_has_main(user_id: int) -> bool:
-    buyers = load_buyers()
-    return user_id in buyers
+async def add_main_buyer(user_id: int):
+    """
+    Добавляет user_id в список купивших основной товар.
+    """
+    await redis.sadd(MAIN_SET_KEY, str(user_id))
 
 
-def add_main_buyer(user_id: int):
-    buyers = load_buyers()
-    if user_id not in buyers:
-        buyers.append(user_id)
-        save_buyers(buyers)
-
-
-# --------- KEYBOARD ---------
-def main_keyboard(user_id: int):
+# ---------- KEYBOARD ----------
+def build_keyboard(has_main: bool) -> InlineKeyboardMarkup:
+    """
+    has_main = купил ли юзер основной товар.
+    """
     btns = [
         [
             InlineKeyboardButton(
@@ -78,7 +66,7 @@ def main_keyboard(user_id: int):
         ]
     ]
 
-    if user_has_main(user_id):
+    if has_main:
         btns.append(
             [
                 InlineKeyboardButton(
@@ -91,12 +79,13 @@ def main_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
-# --------- HANDLERS ---------
+# ---------- HANDLERS ----------
 @dp.message(Command("start"))
 async def start_handler(msg: Message):
+    has_main = await user_has_main(msg.from_user.id)
     await msg.answer(
         "Добро пожаловать! Здесь доступны покупки.",
-        reply_markup=main_keyboard(msg.from_user.id),
+        reply_markup=build_keyboard(has_main),
     )
 
 
@@ -116,7 +105,8 @@ async def buy_main_handler(callback):
 
 @dp.callback_query(F.data == "buy_extra")
 async def buy_extra_handler(callback):
-    if not user_has_main(callback.from_user.id):
+    # Жёстко проверяем: покупка за 50⭐ только после покупки за 300⭐
+    if not await user_has_main(callback.from_user.id):
         await callback.answer(
             "Доступ к покупкам за 50⭐ только после покупки за 300⭐.",
             show_alert=True,
@@ -137,6 +127,7 @@ async def buy_extra_handler(callback):
 
 @dp.pre_checkout_query()
 async def checkout_handler(pre: PreCheckoutQuery):
+    # Можно добавить свои проверки, но сейчас просто подтверждаем
     await bot.answer_pre_checkout_query(pre.id, ok=True)
 
 
@@ -146,7 +137,8 @@ async def payment_success(msg: Message):
     user = msg.from_user
 
     if payload == "main_purchase":
-        add_main_buyer(user.id)
+        # записываем в Redis, что юзер купил основной товар
+        await add_main_buyer(user.id)
         title = TITLE_MAIN
         price = PRICE_MAIN
     elif payload == "extra_purchase":
@@ -155,7 +147,10 @@ async def payment_success(msg: Message):
     else:
         return
 
-    text_user = f"Товар «{title}» активирован!"
+    # Сообщение пользователю
+    await msg.answer(f"Товар «{title}» активирован!")
+
+    # Уведомление в канал
     text_admin = (
         "📩 Новый заказ!\n"
         f"Покупатель: @{user.username or 'нет username'}\n"
@@ -163,19 +158,18 @@ async def payment_success(msg: Message):
         f"Товар: {title}\n"
         f"Оплата: {price}⭐"
     )
-
-    await msg.answer(text_user)
     await bot.send_message(ADMIN_CHANNEL, text_admin)
-    await msg.answer("Меню обновлено:", reply_markup=main_keyboard(user.id))
+
+    # Обновлённое меню (после покупки основного товара всегда показываем доп. товар)
+    has_main = await user_has_main(user.id)
+    await msg.answer("Меню обновлено:", reply_markup=build_keyboard(has_main))
 
 
-# --------- WEBHOOK ENDPOINT ---------
+# ---------- WEBHOOK ----------
 @app.post("/")
 async def telegram_webhook(request: Request):
     data = await request.json()
 
-    # aiogram 3 + pydantic v2
-    update = None
     if hasattr(Update, "model_validate"):
         update = Update.model_validate(data)
     else:
