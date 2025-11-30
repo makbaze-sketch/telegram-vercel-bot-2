@@ -1,5 +1,6 @@
 import os
 import traceback
+import sys
 
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F
@@ -15,12 +16,32 @@ from aiogram.filters import Command
 from redis.asyncio import Redis
 
 # ---------- CONFIG ----------
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_CHANNEL = int(os.environ["ADMIN_CHANNEL"])
-REDIS_URL = os.environ.get("REDIS_URL")
+try:
+    BOT_TOKEN = os.environ.get("BOT_TOKEN")
+    ADMIN_CHANNEL_STR = os.environ.get("ADMIN_CHANNEL")
+    REDIS_URL = os.environ.get("REDIS_URL")
 
-if not REDIS_URL:
-    raise RuntimeError("REDIS_URL не задан в переменных окружения")
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN не задан в переменных окружения.")
+    if not ADMIN_CHANNEL_STR:
+        raise ValueError("ADMIN_CHANNEL не задан в переменных окружения.")
+    if not REDIS_URL:
+        raise RuntimeError("REDIS_URL не задан в переменных окружения")
+
+    # Преобразуем ADMIN_CHANNEL в число
+    try:
+        ADMIN_CHANNEL = int(ADMIN_CHANNEL_STR)
+    except ValueError:
+        raise ValueError(f"ADMIN_CHANNEL должен быть числом, получено: '{ADMIN_CHANNEL_STR}'.")
+
+except Exception as e:
+    # Выводим критическую ошибку инициализации, чтобы она появилась в логах Vercel
+    print("--------------------------------------------------")
+    print(f"КРИТИЧЕСКАЯ ОШИБКА КОНФИГУРАЦИИ: {type(e).__name__}: {e}")
+    print("--------------------------------------------------")
+    # Завершаем процесс, чтобы Vercel сообщил о сбое
+    sys.exit(1)
+
 
 PRICE_MAIN = 300
 PRICE_EXTRA = 50
@@ -35,6 +56,7 @@ DESC_EXTRA = "Дополнительный товар за 50⭐"
 app = FastAPI()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+# Redis.from_url автоматически поддерживает rediss://
 redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
 MAIN_SET_KEY = "buyers_main"
