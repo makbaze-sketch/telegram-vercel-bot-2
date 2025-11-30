@@ -16,7 +16,7 @@ from redis.asyncio import Redis
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_CHANNEL = int(os.environ["ADMIN_CHANNEL"])
-REDIS_URL = os.environ["REDIS_URL"]  # строка подключения к Redis (Upstash и т.п.)
+REDIS_URL = os.environ["REDIS_URL"]  # строка подключения к Redis
 
 PRICE_MAIN = 300
 PRICE_EXTRA = 50
@@ -33,48 +33,37 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
+# ключ Redis, где храним айди купивших основной товар
+MAIN_SET_KEY = "buyers_main"
+
 
 # ---------- STORAGE ----------
-MAIN_SET_KEY = "buyers_main"  # множество user_id, купивших основной товар
-
-
 async def user_has_main(user_id: int) -> bool:
-    """
-    True, если пользователь уже купил основной товар.
-    """
+    """Проверяем, купил ли юзер товар за 300."""
     return await redis.sismember(MAIN_SET_KEY, str(user_id))
 
 
 async def add_main_buyer(user_id: int):
-    """
-    Добавляет user_id в список купивших основной товар.
-    """
+    """Добавляем юзера в список купивших основной товар."""
     await redis.sadd(MAIN_SET_KEY, str(user_id))
 
 
 # ---------- KEYBOARD ----------
 def build_keyboard(has_main: bool) -> InlineKeyboardMarkup:
-    """
-    has_main = купил ли юзер основной товар.
-    """
-    btns = [
-        [
-            InlineKeyboardButton(
-                text=f"Купить «{TITLE_MAIN}» за {PRICE_MAIN}⭐",
-                callback_data="buy_main",
-            )
-        ]
-    ]
+    btns = [[
+        InlineKeyboardButton(
+            text=f"Купить «{TITLE_MAIN}» за {PRICE_MAIN}⭐",
+            callback_data="buy_main",
+        )
+    ]]
 
     if has_main:
-        btns.append(
-            [
-                InlineKeyboardButton(
-                    text=f"Купить «{TITLE_EXTRA}» за {PRICE_EXTRA}⭐",
-                    callback_data="buy_extra",
-                )
-            ]
-        )
+        btns.append([
+            InlineKeyboardButton(
+                text=f"Купить «{TITLE_EXTRA}» за {PRICE_EXTRA}⭐",
+                callback_data="buy_extra",
+            )
+        ])
 
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
@@ -105,7 +94,7 @@ async def buy_main_handler(callback):
 
 @dp.callback_query(F.data == "buy_extra")
 async def buy_extra_handler(callback):
-    # Жёстко проверяем: покупка за 50⭐ только после покупки за 300⭐
+    # Жёстко проверяем, куплен ли основной товар
     if not await user_has_main(callback.from_user.id):
         await callback.answer(
             "Доступ к покупкам за 50⭐ только после покупки за 300⭐.",
@@ -127,7 +116,6 @@ async def buy_extra_handler(callback):
 
 @dp.pre_checkout_query()
 async def checkout_handler(pre: PreCheckoutQuery):
-    # Можно добавить свои проверки, но сейчас просто подтверждаем
     await bot.answer_pre_checkout_query(pre.id, ok=True)
 
 
@@ -137,7 +125,7 @@ async def payment_success(msg: Message):
     user = msg.from_user
 
     if payload == "main_purchase":
-        # записываем в Redis, что юзер купил основной товар
+        # Запоминаем покупку основного товара
         await add_main_buyer(user.id)
         title = TITLE_MAIN
         price = PRICE_MAIN
@@ -160,7 +148,7 @@ async def payment_success(msg: Message):
     )
     await bot.send_message(ADMIN_CHANNEL, text_admin)
 
-    # Обновлённое меню (после покупки основного товара всегда показываем доп. товар)
+    # Обновлённое меню
     has_main = await user_has_main(user.id)
     await msg.answer("Меню обновлено:", reply_markup=build_keyboard(has_main))
 
