@@ -1,6 +1,6 @@
+import os
 import json
 from pathlib import Path
-
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -14,8 +14,9 @@ from aiogram.types import (
 from aiogram.filters import Command
 
 # --------- CONFIG ---------
-TOKEN = "YOUR_BOT_TOKEN"          # TODO: вынеси в ENV на Vercel
-ADMIN_CHANNEL = -1003371815477    # TODO: тоже лучше в ENV
+TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_CHANNEL = int(os.environ["ADMIN_CHANNEL"])
+
 
 PRICE_MAIN = 300
 PRICE_EXTRA = 50
