@@ -1,4 +1,5 @@
 import os
+import traceback
 
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F
@@ -16,11 +17,10 @@ from redis.asyncio import Redis
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_CHANNEL = int(os.environ["ADMIN_CHANNEL"])
+REDIS_URL = os.environ.get("REDIS_URL")
 
-REDIS_URL = os.getenv("REDIS_URL")
 if not REDIS_URL:
-    raise RuntimeError("REDIS_URL не задан в переменных окружения Vercel")
-
+    raise RuntimeError("REDIS_URL не задан в переменных окружения")
 
 PRICE_MAIN = 300
 PRICE_EXTRA = 50
@@ -37,18 +37,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
-# ключ Redis, где храним айди купивших основной товар
 MAIN_SET_KEY = "buyers_main"
 
 
 # ---------- STORAGE ----------
 async def user_has_main(user_id: int) -> bool:
-    """Проверяем, купил ли юзер товар за 300."""
     return await redis.sismember(MAIN_SET_KEY, str(user_id))
 
 
 async def add_main_buyer(user_id: int):
-    """Добавляем юзера в список купивших основной товар."""
     await redis.sadd(MAIN_SET_KEY, str(user_id))
 
 
@@ -60,7 +57,6 @@ def build_keyboard(has_main: bool) -> InlineKeyboardMarkup:
             callback_data="buy_main",
         )
     ]]
-
     if has_main:
         btns.append([
             InlineKeyboardButton(
@@ -68,7 +64,6 @@ def build_keyboard(has_main: bool) -> InlineKeyboardMarkup:
                 callback_data="buy_extra",
             )
         ])
-
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
@@ -98,7 +93,6 @@ async def buy_main_handler(callback):
 
 @dp.callback_query(F.data == "buy_extra")
 async def buy_extra_handler(callback):
-    # Жёстко проверяем, куплен ли основной товар
     if not await user_has_main(callback.from_user.id):
         await callback.answer(
             "Доступ к покупкам за 50⭐ только после покупки за 300⭐.",
@@ -129,7 +123,6 @@ async def payment_success(msg: Message):
     user = msg.from_user
 
     if payload == "main_purchase":
-        # Запоминаем покупку основного товара
         await add_main_buyer(user.id)
         title = TITLE_MAIN
         price = PRICE_MAIN
@@ -139,10 +132,8 @@ async def payment_success(msg: Message):
     else:
         return
 
-    # Сообщение пользователю
     await msg.answer(f"Товар «{title}» активирован!")
 
-    # Уведомление в канал
     text_admin = (
         "📩 Новый заказ!\n"
         f"Покупатель: @{user.username or 'нет username'}\n"
@@ -150,22 +141,44 @@ async def payment_success(msg: Message):
         f"Товар: {title}\n"
         f"Оплата: {price}⭐"
     )
-    await bot.send_message(ADMIN_CHANNEL, text_admin)
 
-    # Обновлённое меню
+    # если сообщение в канал упадёт (бот не админ и т.п.) — не роняем весь вебхук
+    try:
+        await bot.send_message(ADMIN_CHANNEL, text_admin)
+    except Exception:
+        print(f"Ошибка при отправке в ADMIN_CHANNEL={ADMIN_CHANNEL}")
+        traceback.print_exc()
+
     has_main = await user_has_main(user.id)
     await msg.answer("Меню обновлено:", reply_markup=build_keyboard(has_main))
+
+
+# ---------- HEALTHCHECK ----------
+@app.get("/")
+async def healthcheck():
+    return {"status": "ok"}
 
 
 # ---------- WEBHOOK ----------
 @app.post("/")
 async def telegram_webhook(request: Request):
     data = await request.json()
+    print("Incoming update:", data)
 
-    if hasattr(Update, "model_validate"):
-        update = Update.model_validate(data)
-    else:
-        update = Update(**data)
+    try:
+        if hasattr(Update, "model_validate"):
+            update = Update.model_validate(data)
+        else:
+            update = Update(**data)
+    except Exception:
+        print("Ошибка парсинга Update")
+        traceback.print_exc()
+        return {"ok": True}
 
-    await dp.feed_update(bot, update)
+    try:
+        await dp.feed_update(bot, update)
+    except Exception:
+        print("Ошибка в обработчике апдейта")
+        traceback.print_exc()
+        # не отдаём 500 Telegram’у
     return {"ok": True}
